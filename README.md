@@ -24,21 +24,27 @@ This repository has been restructured into a modular and reproducible layout.
 
 ## Quick Start
 1. Inside backend/models/deection, add Goemotion-detection and Sentiment-analysis folders
-1. Copy .env.example to .env and set your values.
+
+2. Copy .env.example to .env and set your values.
    You have to add/change the following - 
+
       JWT_SECRET_KEY= from https://www.jwt.io/
+
       LLM_MODE=remote
+
       LLM_API_URL=https://random.dev
+
       ASR_WS_URL=wss://random-free.dev/ws/asr
+      
       VITE_ASR_WS_URL=wss://random-free.dev/ws/asr
 
-2. Install backend dependencies:
+3. Install backend dependencies:
    - pip install -r requirements.txt
-3. Install frontend dependencies:
+4. Install frontend dependencies:
    - npm install
-4. Run backend:
+5. Run backend:
    - python app.py
-5. Run frontend:
+6. Run frontend:
    - npm run dev
 
 ## Notes
