@@ -1,7 +1,7 @@
 """
 Detection Module
 Loads the emotion (GoEmotions) and mental health (Sentimental-analysis) models
-from the Detection/ folder and provides inference functions for the pipeline.
+from backend/models/detection and provides inference functions for the pipeline.
 """
 
 import re
@@ -11,6 +11,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+from backend.core.config import PROJECT_ROOT, settings
 
 log = logging.getLogger("mindcare.detection")
 
@@ -34,9 +36,9 @@ EMOTION_LABELS = [
 SUICIDAL_IDX = SENTIMENT_LABELS.index("Suicidal")
 
 # ── Model Paths ──────────────────────────────────────────────
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SENTIMENT_MODEL_PATH = os.path.join(BASE_DIR, "Detection", "Sentimental-analysis")
-EMOTION_MODEL_PATH = os.path.join(BASE_DIR, "Detection", "Goemotion-detection")
+MODELS_ROOT = settings.detection_models_dir or str(PROJECT_ROOT / "backend" / "models" / "detection")
+SENTIMENT_MODEL_PATH = os.path.join(MODELS_ROOT, "Sentimental-analysis")
+EMOTION_MODEL_PATH = os.path.join(MODELS_ROOT, "Goemotion-detection")
 
 # ── Lazy-loaded models ───────────────────────────────────────
 _sentiment_tokenizer = None
@@ -119,8 +121,8 @@ def _expand_short_text(text):
 
 
 # ── Chunking for long texts ─────────────────────────────────
-MAX_LEN = 256
-STRIDE = 64
+MAX_LEN = settings.detection_max_len
+STRIDE = settings.detection_stride
 
 
 def _get_chunks(text, tokenizer):
@@ -226,7 +228,7 @@ def classify_mental_health_with_scores(text):
 
 
 def analyze_full(text):
-    """Full analysis matching the Detection/main.py /analyze output format.
+    """Full analysis matching backend/models/detection/main.py /analyze output format.
 
     Returns dict with emotion, mental_state, high_risk, suicidal_signal.
     """

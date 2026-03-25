@@ -14,10 +14,17 @@ build/
 # Model files (large binary — top-level only)
 *.gguf
 
-# Keep Detection model weights tracked
-# Detection/**/*.bin
-# Detection/**/*.safetensors
-# Detection/**/*.pt
+# Detection model artifacts (do not commit)
+backend/models/detection/**/*.safetensors
+backend/models/detection/**/*.pt
+backend/models/detection/**/*.bin
+backend/models/detection/**/tokenizer.json
+backend/models/detection/**/tokenizer_config.json
+backend/models/detection/**/vocab.json
+backend/models/detection/**/vocab.txt
+backend/models/detection/**/merges.txt
+backend/models/detection/**/config.json
+backend/models/detection/**/label_meta.json
 
 # Sentence-transformers cache
 .cache/
@@ -55,3 +62,7 @@ _read_pdf.py
 # Environment variables
 .env
 .env.*
+!.env.example
+
+# Backend modular package
+backend/__pycache__/

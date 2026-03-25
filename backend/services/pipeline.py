@@ -9,13 +9,16 @@ Components connected:
 6. LLM Response → 7. Safety Guardrails → 8. Return result
 """
 
-import os
-from input_gate import check_input
-from prompt_builder import build_prompt
-from safety_guardrails import apply_safety_guardrails
-from conversation_history import ConversationHistory
-from session_summary import generate_session_summary
-from detection import detect_emotion, classify_mental_health, classify_mental_health_with_scores
+import logging
+from .input_gate import check_input
+from .prompt_builder import build_prompt
+from .safety_guardrails import apply_safety_guardrails
+from .conversation_history import ConversationHistory
+from .session_summary import generate_session_summary
+from .detection import detect_emotion, classify_mental_health, classify_mental_health_with_scores
+
+
+log = logging.getLogger("mindcare.pipeline")
 
 # These are loaded lazily to avoid slow imports at module level
 _llm_responder = None
@@ -24,13 +27,14 @@ _llm_responder = None
 def _get_llm_responder():
     global _llm_responder
     if _llm_responder is None:
-        from llm_responder import LLMResponder
+        from .llm_responder import LLMResponder
         _llm_responder = LLMResponder()
     return _llm_responder
 
 
 # detect_emotion and classify_mental_health are imported from detection.py
-# They use the trained models in Detection/Goemotion-detection/ and Detection/Sentimental-analysis/
+# They use the trained models in backend/models/detection/Goemotion-detection/
+# and backend/models/detection/Sentimental-analysis/
 
 # ── Statuses where we use the gate response directly (skip LLM) ──
 _GATE_RESPONSE_STATUSES = {
@@ -80,12 +84,17 @@ def process_user_input(user_message, conversation_history):
     # Skip for greetings, too_short, off_topic, hard_refuse to avoid noisy
     # data in Mental State page. Still run for harmful_validation and
     # dependency so Mental State page captures those emotional states.
+    emotion, emotion_score = None, 0.0
+    category, category_score, all_scores = None, 0.0, {}
     if status in _RUN_DETECTION_STATUSES:
-        emotion, emotion_score = detect_emotion(user_message)
-        category, category_score, all_scores = classify_mental_health_with_scores(user_message)
-    else:
-        emotion, emotion_score = None, 0.0
-        category, category_score, all_scores = None, 0.0, {}
+        try:
+            emotion, emotion_score = detect_emotion(user_message)
+            category, category_score, all_scores = classify_mental_health_with_scores(user_message)
+        except Exception as exc:
+            # Keep chat alive even when local model files are missing/unavailable.
+            log.exception("Detection failed; falling back to neutral analysis: %s", exc)
+            emotion, emotion_score = "neutral", 0.5
+            category, category_score, all_scores = "Normal", 0.5, {}
 
     if status != "proceed":
         # Non-proceed: store detection results but use gate response, skip LLM
@@ -117,8 +126,12 @@ def process_user_input(user_message, conversation_history):
     )
 
     # Step 6: LLM Response
-    llm = _get_llm_responder()
-    response = llm.generate_response(prompt)
+    try:
+        llm = _get_llm_responder()
+        response = llm.generate_response(prompt)
+    except Exception as exc:
+        log.exception("LLM generation failed: %s", exc)
+        response = "I'm having trouble responding right now, but I'm here with you. Could you share a little more?"
 
     # Step 7: Safety Guardrails
     response = apply_safety_guardrails(response, emotion_score, category_score,

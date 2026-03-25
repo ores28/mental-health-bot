@@ -3,8 +3,28 @@ import { FaMicrophone, FaRedo, FaBrain, FaWifi, FaPlug, FaVolumeUp, FaVolumeMute
 import { API_BASE, ASR_WS_URL, ENDPOINTS } from '../config/api';
 import Sidebar from './Sidebar';
 
-const DEFAULT_WS_URL = localStorage.getItem('asr_ws_url') || ASR_WS_URL;
+// Prefer env-provided URL; only fall back to localStorage when env is empty.
+const DEFAULT_WS_URL = (ASR_WS_URL && ASR_WS_URL.trim()) || localStorage.getItem('asr_ws_url') || '';
 // API_BASE now imported from config/api.js
+
+function normalizeWsUrl(input) {
+  let url = (input || '').trim();
+  if (!url) return '';
+
+  // Convert accidental http(s) URLs to ws(s) URLs.
+  if (url.startsWith('https://')) url = 'wss://' + url.slice('https://'.length);
+  if (url.startsWith('http://')) url = 'ws://' + url.slice('http://'.length);
+
+  if (!/^wss?:\/\//i.test(url)) {
+    throw new Error('WebSocket URL must start with ws:// or wss://');
+  }
+
+  if (!url.endsWith('/ws/asr')) {
+    url = url.replace(/\/+$/, '') + '/ws/asr';
+  }
+
+  return url;
+}
 
 function getToken() { return localStorage.getItem('token'); }
 function authHeaders() { const t = getToken(); return t ? { Authorization: `Bearer ${t}` } : {}; }
@@ -36,7 +56,13 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
   const manualDisconnectRef = useRef(false);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimeoutRef = useRef(null);
-  const MAX_RECONNECT_ATTEMPTS = 6;
+  const shouldStartOnConnectRef = useRef(false);
+  const silenceIntervalRef = useRef(null);
+  const lastSpeechAtRef = useRef(0);
+  const isStoppingRef = useRef(false);
+  const SILENCE_MS = 5000;
+  const MAX_RECONNECT_DELAY_MS = 30000;
+  const SPEECH_RMS_THRESHOLD = 0.01;
   
   // Text accumulation
   const accumulatedTextRef = useRef('');
@@ -320,7 +346,6 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
       analyzeText(finalText);
     } else {
       console.log('[Voice] No text captured');
-      alert('No speech detected. Please try speaking again.');
     }
     
     // Reset buffers for next recording
@@ -329,6 +354,7 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
     setPartialTranscript('');
     isWaitingForFlushRef.current = false;
     setIsStopping(false);
+    isStoppingRef.current = false;
     
     // Keep WebSocket open for next recording
     console.log('[Voice] Ready for next recording');
@@ -341,19 +367,29 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
       return;
     }
 
-    if (!wsUrl.trim()) {
-      alert('Please enter the ASR WebSocket URL first!\nGet it from the Colab notebook (Cell 6).');
+    if (wsRef.current && wsRef.current.readyState === WebSocket.CONNECTING) {
+      console.log('[WS] Connection in progress');
       return;
     }
 
-    // Ensure URL ends with /ws/asr
-    let url = wsUrl.trim();
-    if (!url.endsWith('/ws/asr')) {
-      url = url.replace(/\/+$/, '') + '/ws/asr';
+    if (!wsUrl.trim()) {
+      console.warn('[WS] Missing ASR websocket URL');
+      setConnectionStatus('error');
+      return;
     }
 
-    // Save for next session
-    localStorage.setItem('asr_ws_url', wsUrl.trim());
+    let url;
+    try {
+      url = normalizeWsUrl(wsUrl);
+    } catch (e) {
+      console.warn('[WS] Invalid URL:', e.message);
+      setConnectionStatus('error');
+      return;
+    }
+
+    // Save normalized URL for next session.
+    localStorage.setItem('asr_ws_url', url);
+    setWsUrl(url);
 
     console.log('[WS] Connecting to server...');
     setConnectionStatus('connecting');
@@ -368,6 +404,10 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
       setIsConnected(true);
       reconnectAttemptsRef.current = 0;
       if (reconnectTimeoutRef.current) { clearTimeout(reconnectTimeoutRef.current); reconnectTimeoutRef.current = null; }
+      if (shouldStartOnConnectRef.current) {
+        shouldStartOnConnectRef.current = false;
+        startRecording();
+      }
     };
     
     ws.onmessage = (event) => {
@@ -435,16 +475,12 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
       // If user didn't manually disconnect, attempt reconnect with backoff
       if (!manualDisconnectRef.current) {
         const attempts = reconnectAttemptsRef.current || 0;
-        if (attempts < MAX_RECONNECT_ATTEMPTS) {
-          const delay = Math.min(1000 * Math.pow(2, attempts), 30000);
-          reconnectAttemptsRef.current = attempts + 1;
-          console.log('[WS] Scheduling reconnect in', delay, 'ms (attempt', reconnectAttemptsRef.current + ')');
-          reconnectTimeoutRef.current = setTimeout(() => {
-            connectToServer();
-          }, delay);
-        } else {
-          console.warn('[WS] Max reconnect attempts reached; not reconnecting automatically');
-        }
+        const delay = Math.min(1000 * Math.pow(2, attempts), MAX_RECONNECT_DELAY_MS);
+        reconnectAttemptsRef.current = attempts + 1;
+        console.log('[WS] Scheduling reconnect in', delay, 'ms (attempt', reconnectAttemptsRef.current, ')');
+        reconnectTimeoutRef.current = setTimeout(() => {
+          connectToServer();
+        }, delay);
       }
     };
 
@@ -456,6 +492,10 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
     manualDisconnectRef.current = true;
     if (isListening) {
       stopRecording();
+    }
+    if (silenceIntervalRef.current) {
+      clearInterval(silenceIntervalRef.current);
+      silenceIntervalRef.current = null;
     }
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
@@ -487,8 +527,9 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
   // Start Recording
   const startRecording = async () => {
     if (!isConnected || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      alert('Please connect to server first (click green connect button)!');
-      console.log('[Voice] Cannot record: not connected');
+      console.log('[Voice] Not connected yet, auto-connecting before recording');
+      shouldStartOnConnectRef.current = true;
+      connectToServer();
       return;
     }
 
@@ -502,6 +543,7 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
     isWaitingForFlushRef.current = false;
     hasProcessedRef.current = false;
     setIsStopping(false);
+    isStoppingRef.current = false;
     
     if (flushTimeoutRef.current) {
       clearTimeout(flushTimeoutRef.current);
@@ -535,10 +577,19 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
       const source = audioContextRef.current.createMediaStreamSource(mediaStream);
       const bufferSize = 2048;
       const processor = audioContextRef.current.createScriptProcessor(bufferSize, 1, 1);
+      lastSpeechAtRef.current = Date.now();
 
       processor.onaudioprocess = (event) => {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
         const input = event.inputBuffer.getChannelData(0);
+        let sum = 0;
+        for (let i = 0; i < input.length; i++) {
+          sum += input[i] * input[i];
+        }
+        const rms = Math.sqrt(sum / input.length);
+        if (rms > SPEECH_RMS_THRESHOLD) {
+          lastSpeechAtRef.current = Date.now();
+        }
         wsRef.current.send(floatTo16BitPCM(input));
       };
 
@@ -547,6 +598,18 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
 
       processorRef.current = processor;
       setIsListening(true);
+
+      if (silenceIntervalRef.current) {
+        clearInterval(silenceIntervalRef.current);
+      }
+      silenceIntervalRef.current = setInterval(() => {
+        if (!processorRef.current || isStoppingRef.current) return;
+        if (Date.now() - lastSpeechAtRef.current >= SILENCE_MS) {
+          console.log('[Voice] Silence timeout reached, auto-sending');
+          stopRecording();
+        }
+      }, 250);
+
       console.log('[Voice] Recording started');
     } catch (err) {
       console.error('Error starting recording:', err);
@@ -556,8 +619,18 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
 
   // Stop Recording - WITH FLUSH but DON'T close server!
   const stopRecording = () => {
+    if (isStoppingRef.current) {
+      return;
+    }
+    isStoppingRef.current = true;
+
     console.log('[Voice] Stopping recording...');
     setIsStopping(true);
+
+    if (silenceIntervalRef.current) {
+      clearInterval(silenceIntervalRef.current);
+      silenceIntervalRef.current = null;
+    }
     
     // Stop audio processing
     if (processorRef.current) {
@@ -634,11 +707,17 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
     isWaitingForFlushRef.current = false;
     hasProcessedRef.current = false;
     setIsStopping(false);
+    isStoppingRef.current = false;
     setSessionEnded(false);
     
     if (flushTimeoutRef.current) {
       clearTimeout(flushTimeoutRef.current);
       flushTimeoutRef.current = null;
+    }
+
+    if (silenceIntervalRef.current) {
+      clearInterval(silenceIntervalRef.current);
+      silenceIntervalRef.current = null;
     }
     
     window.speechSynthesis.cancel();
@@ -676,6 +755,9 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
       }
       if (flushTimeoutRef.current) {
         clearTimeout(flushTimeoutRef.current);
+      }
+      if (silenceIntervalRef.current) {
+        clearInterval(silenceIntervalRef.current);
       }
     };
   }, []);

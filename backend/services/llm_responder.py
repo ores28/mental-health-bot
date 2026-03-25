@@ -13,6 +13,9 @@ import logging
 import urllib.request
 import urllib.error
 
+from backend.core.config import PROJECT_ROOT, settings
+from backend.tuning.prompt_and_model_tuning import MODEL_TUNING
+
 log = logging.getLogger("mindcare.llm")
 
 
@@ -26,9 +29,9 @@ class LLMResponder:
         Local mode: Only used if LLM_API_URL is not set AND the .gguf
         file exists locally.
         """
-        self.remote_url = os.environ.get(
-            "LLM_API_URL", "https://spongy-kynlee-unflat.ngrok-free.dev"
-        ).strip()
+        configured_mode = MODEL_TUNING.get("llm_mode", "auto")
+        configured_url = MODEL_TUNING.get("llm_api_url", "").strip()
+        self.remote_url = configured_url if configured_mode in ("auto", "remote") else ""
         self.llm = None
 
         if self.remote_url:
@@ -38,9 +41,7 @@ class LLMResponder:
         else:
             # Local mode — load model into memory
             if model_path is None:
-                model_path = os.path.join(
-                    os.path.dirname(__file__), "Counselor_Llama3_Q4.gguf"
-                )
+                model_path = MODEL_TUNING.get("llm_local_model_path") or str(PROJECT_ROOT / "Counselor_Llama3_Q4.gguf")
 
             if not os.path.exists(model_path):
                 raise FileNotFoundError(
@@ -71,8 +72,8 @@ class LLMResponder:
         """Generate response using local GGUF model."""
         output = self.llm(
             prompt,
-            max_tokens=300,
-            temperature=0.7,
+            max_tokens=int(MODEL_TUNING.get("llm_max_tokens", settings.llm_max_tokens)),
+            temperature=float(MODEL_TUNING.get("llm_temperature", settings.llm_temperature)),
             stop=["User:", "Human:", "<|eot_id|>"],
             echo=False
         )
@@ -83,8 +84,8 @@ class LLMResponder:
         url = f"{self.remote_url}/generate"
         payload = json.dumps({
             "prompt": prompt,
-            "max_tokens": 300,
-            "temperature": 0.7
+            "max_tokens": int(MODEL_TUNING.get("llm_max_tokens", settings.llm_max_tokens)),
+            "temperature": float(MODEL_TUNING.get("llm_temperature", settings.llm_temperature)),
         }).encode("utf-8")
 
         req = urllib.request.Request(
@@ -95,7 +96,7 @@ class LLMResponder:
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=int(MODEL_TUNING.get("llm_timeout_sec", settings.llm_timeout_sec))) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 return data.get("response", "").strip()
         except urllib.error.URLError as e:

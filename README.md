@@ -1,156 +1,54 @@
-# Mental Health AI Chatbot — Aria
+# Mental Health Chatbot
 
-## Project Structure
+This repository has been restructured into a modular and reproducible layout.
 
-```
-finalized model/
-├── app.py                      # Flask API backend (run this first)
-├── pipeline.py                 # Full pipeline connecting all components
-├── conversation_history.py     # Conversation history manager
-├── input_gate.py               # Input gate / filter with 3 crisis levels
-├── prompt_builder.py           # Prompt builder for Llama 3 instruct
-├── llm_responder.py            # LLM response generator (local or remote Colab)
-├── safety_guardrails.py        # Post-response safety rules
-├── session_summary.py          # Rule-based session summary
-<!-- RAG removed from project -->
-├── requirements.txt            # Python dependencies
-├── detection.py                # Emotion + mental health model inference module
-├── Counselor_Llama3_Q4.gguf    # Fine-tuned LLM model file (4.58 GB)
-├── Detection/                  # Trained detection models
-│   ├── Goemotion-detection/    # DistilBERT GoEmotions model (28 emotions)
-│   │   ├── config.json
-│   │   ├── model.safetensors
-│   │   ├── tokenizer.json
-│   │   └── ...
-│   ├── Sentimental-analysis/   # RoBERTa mental health classifier (6 classes)
-│   │   ├── config.json
-│   │   ├── model.safetensors
-│   │   ├── label_meta.json
-│   │   └── ...
-│   └── main.py                 # Original standalone FastAPI server (reference)
-├── package.json                # React dependencies
-├── vite.config.js              # Vite config with API proxy
-├── tailwind.config.js          # Tailwind CSS config
-├── index.html                  # React entry HTML
-├── asr/                        # ASR streaming server (runs on Google Colab)
-│   ├── ASR_Colab_Server.ipynb  # Colab notebook — run this on Colab
-│   ├── server_streaming_optimized.py  # FastAPI WebSocket ASR server
-│   ├── frequency_dictionary_en_82_765.txt       # SymSpell dictionary
-│   └── frequency_bigramdictionary_en_243_342.txt # SymSpell bigrams
-├── colab/                      # LLM Colab server
-│   └── LLM_Colab_Server.ipynb  # Colab notebook — run LLM on Colab GPU
-├── src/                        # React frontend source
-│   ├── App.jsx                 # Main app (chat + pipeline integration)
-│   ├── main.jsx                # React entry point
-│   ├── index.css               # Global styles
-│   └── components/
-│       ├── ChatInputBar.jsx    # Chat input with voice button
-│       ├── VoicePage.jsx       # Voice recording + ASR
-│       ├── MentalStatePage.jsx # Emotion/classification results
-│       ├── HistoryPage.jsx     # Analysis history
-│       ├── FAQsPage.jsx        # FAQs
-│       ├── Sidebar.jsx         # Navigation sidebar
-│       ├── SentimentGraph.jsx  # Live sentiment trend graph
-│       └── SessionSummary.jsx  # End-of-session summary card
-└── public/                     # Static assets
-```
+## What Changed
+
+- Detection is now part of this repository directly.
+- Backend implementation moved under backend/.
+- Root entrypoint app.py is a thin launcher for backend/api/application.py.
+- Environment-based configuration is standardized with .env.example.
+- Prompt/model tuning is centralized for quick experimentation.
+
+## Project Layout
+
+- backend/api/application.py: FastAPI application
+- backend/core/config.py: Environment-backed settings
+- backend/core/runtime_state.py: Rate limiter implementations
+- backend/tuning/prompt_and_model_tuning.py: Prompt and model tuning knobs
+- backend/services/: Pipeline, detection, prompts, safety, summaries
+- backend/models/detection/: Detection model artifacts and assets
+- src/: React frontend
+- docs/: Architecture, deployment, security, privacy notes
+- scripts/: Local setup and run scripts
 
 ## Quick Start
+1. Inside backend/models/deection, add Goemotion-detection and Sentiment-analysis folders
+1. Copy .env.example to .env and set your values.
+   You have to add/change the following - 
+      JWT_SECRET_KEY= from https://www.jwt.io/
+      LLM_MODE=remote
+      LLM_API_URL=https://random.dev
+      ASR_WS_URL=wss://random-free.dev/ws/asr
+      VITE_ASR_WS_URL=wss://random-free.dev/ws/asr
 
-### 1. Install Python dependencies
-```bash
-pip install -r requirements.txt
-```
+2. Install backend dependencies:
+   - pip install -r requirements.txt
+3. Install frontend dependencies:
+   - npm install
+4. Run backend:
+   - python app.py
+5. Run frontend:
+   - npm run dev
 
-### 2. Install React dependencies
-```bash
-npm install
-```
+## Notes
 
-### 3. Set up the LLM (Google Colab — recommended)
+- Use .env to switch between local and Colab endpoints.
+- Detection model path can be overridden with DETECTION_MODELS_DIR.
 
-The 4.58 GB LLM model is best run on Google Colab with a free T4 GPU.
+## Local + Colab Hybrid
 
-1. Open `colab/LLM_Colab_Server.ipynb` in Google Colab
-2. Set runtime to **GPU** (Runtime → Change runtime type → T4 GPU)
-3. Upload `Counselor_Llama3_Q4.gguf` when prompted (Cell 2)
-4. Paste your ngrok auth token in Cell 3 (get one free at https://dashboard.ngrok.com)
-5. Run all cells in order
-6. Copy the public ngrok URL from Cell 5 (e.g. `https://xyz.ngrok-free.app`)
-7. Set the environment variable before starting the backend:
-
-**PowerShell:**
-```powershell
-$env:LLM_API_URL = "https://xyz.ngrok-free.app"
-```
-
-**Linux / macOS / Colab:**
-```bash
-export LLM_API_URL="https://xyz.ngrok-free.app"
-```
-
-> **Local mode (16+ GB RAM):** If you have enough RAM, skip Colab. Place `Counselor_Llama3_Q4.gguf` in this directory and do **not** set `LLM_API_URL`. The model will load locally.
-
-### 4. Run both servers
-
-**Terminal 1 — Backend:**
-```powershell
-$env:LLM_API_URL = "https://xyz.ngrok-free.app"   # your Colab URL
-python app.py
-```
-
-**Terminal 2 — Frontend:**
-```bash
-npm run dev
-```
-
-Open the URL shown by Vite (usually **http://localhost:5173**).
-
-## API Endpoints
-
-| Endpoint | Method | Description |
-|---|---|---|
-| `/analyze` | POST | Emotion + mental health analysis (existing React API) |
-| `/api/chat` | POST | Full pipeline: analysis + LLM counselor response |
-| `/api/sentiment` | GET | Sentiment trend data for graph |
-| `/api/summary` | POST | End session, get summary |
-| `/api/history` | GET | Full chat history |
-
-## ASR Server (Google Colab)
-
-The Voice Page uses a **Faster Whisper ASR** streaming server that runs on **Google Colab** with GPU acceleration.
-
-### Setup
-
-1. Open `asr/ASR_Colab_Server.ipynb` in Google Colab
-2. Set runtime to **GPU** (Runtime → Change runtime type → T4 GPU)
-3. Upload the 3 files from `asr/` folder:
-   - `server_streaming_optimized.py`
-   - `frequency_dictionary_en_82_765.txt`
-   - `frequency_bigramdictionary_en_243_342.txt`
-4. Run all cells in order
-5. Copy the `wss://...ngrok.../ws/asr` URL from Cell 6
-6. Paste it into the Voice Page URL input field in the React app
-7. Click **Connect Server** and start speaking
-
-> **Note:** The ngrok URL changes each time you restart the Colab notebook. Paste the new URL each session.
-
-## LLM Server (Google Colab)
-
-The counselor LLM (Counselor_Llama3_Q4.gguf, 4.58 GB) runs on **Google Colab** to avoid the 8+ GB RAM needed locally.
-
-### Setup
-
-1. Open `colab/LLM_Colab_Server.ipynb` in Google Colab
-2. Set runtime to **GPU** (Runtime → Change runtime type → T4 GPU)
-3. Upload `Counselor_Llama3_Q4.gguf` when prompted (Cell 2)
-4. Paste your ngrok auth token in Cell 3
-5. Run all cells — Cell 4 starts a Flask API and Cell 5 prints the public URL
-6. Set the `LLM_API_URL` environment variable to that URL before running `python app.py`
-
-### API
-
-| Endpoint | Method | Body | Response |
-|---|---|---|---|
-| `/generate` | POST | `{"prompt": "...", "max_tokens": 300, "temperature": 0.7}` | `{"response": "..."}` |
-| `/health` | GET | — | `{"status": "ok"}` |
+1. Keep backend/frontend running locally.
+2. For Colab LLM, set LLM_MODE=remote and LLM_API_URL in .env.
+3. For local LLM, set LLM_MODE=local and ensure LLM_LOCAL_MODEL_PATH exists.
+4. For Colab ASR, set ASR_WS_URL and VITE_ASR_WS_URL.

@@ -5,6 +5,8 @@ and RAG example into a structured prompt for the LLM.
 Uses Llama 3 instruct template format.
 """
 
+from backend.tuning.prompt_and_model_tuning import get_prompt_bundle
+
 
 SYSTEM_PROMPT = (
     "You are a supportive, friendly companion for mental health conversations. "
@@ -90,11 +92,16 @@ _FEW_SHOT = (
 
 def build_prompt(user_message, emotion, emotion_score, category, category_score,
                  conversation_history):
+    tuning = get_prompt_bundle()
+    system_prompt = tuning["system_prompt"]
+    few_shot = tuning["few_shot"]
+    history_turns = tuning["history_turns"]
+    crisis_threshold = tuning["crisis_threshold"]
 
     # Build recent history (last 6 turns)
     history_str = ""
     if conversation_history:
-        recent = conversation_history[-6:]
+        recent = conversation_history[-history_turns:]
         lines = []
         for msg in recent:
             role = msg.get("role", "user")
@@ -107,7 +114,7 @@ def build_prompt(user_message, emotion, emotion_score, category, category_score,
 
     # Add crisis note if high risk
     crisis_note = ""
-    if category in _HIGH_RISK_CATEGORIES and category_score >= 0.55:
+    if category in _HIGH_RISK_CATEGORIES and category_score >= crisis_threshold:
         crisis_note = (
             "NOTE: This person may be in serious distress. "
             "Be especially gentle and present. "
@@ -115,9 +122,9 @@ def build_prompt(user_message, emotion, emotion_score, category, category_score,
         )
 
     prompt = (
-        f"{SYSTEM_PROMPT}\n\n"
+        f"{system_prompt}\n\n"
         f"Here are examples of how Aria responds:\n\n"
-        f"{_FEW_SHOT}"
+        f"{few_shot}"
         f"{crisis_note}"
         f"{history_str}"
         f"User: {user_message}\n"
