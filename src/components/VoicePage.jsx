@@ -3,28 +3,8 @@ import { FaMicrophone, FaRedo, FaBrain, FaWifi, FaPlug, FaVolumeUp, FaVolumeMute
 import { API_BASE, ASR_WS_URL, ENDPOINTS } from '../config/api';
 import Sidebar from './Sidebar';
 
-// Prefer env-provided URL; only fall back to localStorage when env is empty.
-const DEFAULT_WS_URL = (ASR_WS_URL && ASR_WS_URL.trim()) || localStorage.getItem('asr_ws_url') || '';
+const DEFAULT_WS_URL = localStorage.getItem('asr_ws_url') || ASR_WS_URL;
 // API_BASE now imported from config/api.js
-
-function normalizeWsUrl(input) {
-  let url = (input || '').trim();
-  if (!url) return '';
-
-  // Convert accidental http(s) URLs to ws(s) URLs.
-  if (url.startsWith('https://')) url = 'wss://' + url.slice('https://'.length);
-  if (url.startsWith('http://')) url = 'ws://' + url.slice('http://'.length);
-
-  if (!/^wss?:\/\//i.test(url)) {
-    throw new Error('WebSocket URL must start with ws:// or wss://');
-  }
-
-  if (!url.endsWith('/ws/asr')) {
-    url = url.replace(/\/+$/, '') + '/ws/asr';
-  }
-
-  return url;
-}
 
 function getToken() { return localStorage.getItem('token'); }
 function authHeaders() { const t = getToken(); return t ? { Authorization: `Bearer ${t}` } : {}; }
@@ -56,13 +36,7 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
   const manualDisconnectRef = useRef(false);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimeoutRef = useRef(null);
-  const shouldStartOnConnectRef = useRef(false);
-  const silenceIntervalRef = useRef(null);
-  const lastSpeechAtRef = useRef(0);
-  const isStoppingRef = useRef(false);
-  const SILENCE_MS = 5000;
-  const MAX_RECONNECT_DELAY_MS = 30000;
-  const SPEECH_RMS_THRESHOLD = 0.01;
+  const MAX_RECONNECT_ATTEMPTS = 6;
   
   // Text accumulation
   const accumulatedTextRef = useRef('');
@@ -346,6 +320,7 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
       analyzeText(finalText);
     } else {
       console.log('[Voice] No text captured');
+      alert('No speech detected. Please try speaking again.');
     }
     
     // Reset buffers for next recording
@@ -354,7 +329,6 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
     setPartialTranscript('');
     isWaitingForFlushRef.current = false;
     setIsStopping(false);
-    isStoppingRef.current = false;
     
     // Keep WebSocket open for next recording
     console.log('[Voice] Ready for next recording');
@@ -367,29 +341,19 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
       return;
     }
 
-    if (wsRef.current && wsRef.current.readyState === WebSocket.CONNECTING) {
-      console.log('[WS] Connection in progress');
-      return;
-    }
-
     if (!wsUrl.trim()) {
-      console.warn('[WS] Missing ASR websocket URL');
-      setConnectionStatus('error');
+      alert('Please enter the ASR WebSocket URL first!\nGet it from the Colab notebook (Cell 6).');
       return;
     }
 
-    let url;
-    try {
-      url = normalizeWsUrl(wsUrl);
-    } catch (e) {
-      console.warn('[WS] Invalid URL:', e.message);
-      setConnectionStatus('error');
-      return;
+    // Ensure URL ends with /ws/asr
+    let url = wsUrl.trim();
+    if (!url.endsWith('/ws/asr')) {
+      url = url.replace(/\/+$/, '') + '/ws/asr';
     }
 
-    // Save normalized URL for next session.
-    localStorage.setItem('asr_ws_url', url);
-    setWsUrl(url);
+    // Save for next session
+    localStorage.setItem('asr_ws_url', wsUrl.trim());
 
     console.log('[WS] Connecting to server...');
     setConnectionStatus('connecting');
@@ -404,10 +368,6 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
       setIsConnected(true);
       reconnectAttemptsRef.current = 0;
       if (reconnectTimeoutRef.current) { clearTimeout(reconnectTimeoutRef.current); reconnectTimeoutRef.current = null; }
-      if (shouldStartOnConnectRef.current) {
-        shouldStartOnConnectRef.current = false;
-        startRecording();
-      }
     };
     
     ws.onmessage = (event) => {
@@ -475,12 +435,16 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
       // If user didn't manually disconnect, attempt reconnect with backoff
       if (!manualDisconnectRef.current) {
         const attempts = reconnectAttemptsRef.current || 0;
-        const delay = Math.min(1000 * Math.pow(2, attempts), MAX_RECONNECT_DELAY_MS);
-        reconnectAttemptsRef.current = attempts + 1;
-        console.log('[WS] Scheduling reconnect in', delay, 'ms (attempt', reconnectAttemptsRef.current, ')');
-        reconnectTimeoutRef.current = setTimeout(() => {
-          connectToServer();
-        }, delay);
+        if (attempts < MAX_RECONNECT_ATTEMPTS) {
+          const delay = Math.min(1000 * Math.pow(2, attempts), 30000);
+          reconnectAttemptsRef.current = attempts + 1;
+          console.log('[WS] Scheduling reconnect in', delay, 'ms (attempt', reconnectAttemptsRef.current + ')');
+          reconnectTimeoutRef.current = setTimeout(() => {
+            connectToServer();
+          }, delay);
+        } else {
+          console.warn('[WS] Max reconnect attempts reached; not reconnecting automatically');
+        }
       }
     };
 
@@ -492,10 +456,6 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
     manualDisconnectRef.current = true;
     if (isListening) {
       stopRecording();
-    }
-    if (silenceIntervalRef.current) {
-      clearInterval(silenceIntervalRef.current);
-      silenceIntervalRef.current = null;
     }
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
@@ -527,9 +487,8 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
   // Start Recording
   const startRecording = async () => {
     if (!isConnected || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      console.log('[Voice] Not connected yet, auto-connecting before recording');
-      shouldStartOnConnectRef.current = true;
-      connectToServer();
+      alert('Please connect to server first (click green connect button)!');
+      console.log('[Voice] Cannot record: not connected');
       return;
     }
 
@@ -543,7 +502,6 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
     isWaitingForFlushRef.current = false;
     hasProcessedRef.current = false;
     setIsStopping(false);
-    isStoppingRef.current = false;
     
     if (flushTimeoutRef.current) {
       clearTimeout(flushTimeoutRef.current);
@@ -577,19 +535,10 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
       const source = audioContextRef.current.createMediaStreamSource(mediaStream);
       const bufferSize = 2048;
       const processor = audioContextRef.current.createScriptProcessor(bufferSize, 1, 1);
-      lastSpeechAtRef.current = Date.now();
 
       processor.onaudioprocess = (event) => {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
         const input = event.inputBuffer.getChannelData(0);
-        let sum = 0;
-        for (let i = 0; i < input.length; i++) {
-          sum += input[i] * input[i];
-        }
-        const rms = Math.sqrt(sum / input.length);
-        if (rms > SPEECH_RMS_THRESHOLD) {
-          lastSpeechAtRef.current = Date.now();
-        }
         wsRef.current.send(floatTo16BitPCM(input));
       };
 
@@ -598,18 +547,6 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
 
       processorRef.current = processor;
       setIsListening(true);
-
-      if (silenceIntervalRef.current) {
-        clearInterval(silenceIntervalRef.current);
-      }
-      silenceIntervalRef.current = setInterval(() => {
-        if (!processorRef.current || isStoppingRef.current) return;
-        if (Date.now() - lastSpeechAtRef.current >= SILENCE_MS) {
-          console.log('[Voice] Silence timeout reached, auto-sending');
-          stopRecording();
-        }
-      }, 250);
-
       console.log('[Voice] Recording started');
     } catch (err) {
       console.error('Error starting recording:', err);
@@ -619,18 +556,8 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
 
   // Stop Recording - WITH FLUSH but DON'T close server!
   const stopRecording = () => {
-    if (isStoppingRef.current) {
-      return;
-    }
-    isStoppingRef.current = true;
-
     console.log('[Voice] Stopping recording...');
     setIsStopping(true);
-
-    if (silenceIntervalRef.current) {
-      clearInterval(silenceIntervalRef.current);
-      silenceIntervalRef.current = null;
-    }
     
     // Stop audio processing
     if (processorRef.current) {
@@ -707,17 +634,11 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
     isWaitingForFlushRef.current = false;
     hasProcessedRef.current = false;
     setIsStopping(false);
-    isStoppingRef.current = false;
     setSessionEnded(false);
     
     if (flushTimeoutRef.current) {
       clearTimeout(flushTimeoutRef.current);
       flushTimeoutRef.current = null;
-    }
-
-    if (silenceIntervalRef.current) {
-      clearInterval(silenceIntervalRef.current);
-      silenceIntervalRef.current = null;
     }
     
     window.speechSynthesis.cancel();
@@ -756,14 +677,11 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
       if (flushTimeoutRef.current) {
         clearTimeout(flushTimeoutRef.current);
       }
-      if (silenceIntervalRef.current) {
-        clearInterval(silenceIntervalRef.current);
-      }
     };
   }, []);
 
   return (
-    <div className="flex h-screen bg-[#0a0515] text-white overflow-hidden">
+    <div className="flex h-screen bg-[#120820] text-white overflow-hidden">
       
       <Sidebar 
         onHomeClick={onHomeClick}
@@ -775,13 +693,13 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
         user={user} onLogout={onLogout} onNewChat={onNewChat}
       />
 
-      <div className="flex flex-col flex-1 relative overflow-hidden bg-gradient-to-br from-[#0a0515] via-[#140a2e] to-[#0a0515]">
+      <div className="flex flex-col flex-1 relative overflow-hidden bg-gradient-to-br from-[#120820] via-[#1e1240] to-[#120820]">
 
         <div className="absolute inset-0 z-0 pointer-events-none">
           {[...Array(80)].map((_, i) => (
             <div 
               key={i} 
-              className="absolute bg-white rounded-full opacity-30 animate-pulse"
+              className="absolute bg-white rounded-full opacity-40 animate-pulse"
               style={{
                 width: `${Math.random() * 2 + 1}px`,
                 height: `${Math.random() * 2 + 1}px`,
@@ -830,7 +748,7 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
               onClick={() => { setTtsEnabled(prev => { const next = !prev; ttsEnabledRef.current = next; if (!next) { window.speechSynthesis.cancel(); if (ttsAudioRef.current) { ttsAudioRef.current.pause(); ttsAudioRef.current = null; } } return next; }); setIsSpeaking(false); }}
               className={`flex items-center gap-1.5 px-3 py-2 rounded-full transition-all backdrop-blur-md border
                 ${ttsEnabled
-                  ? 'bg-purple-600/40 border-purple-400/40 text-purple-200'
+                  ? 'bg-purple-600/40 border-purple-400/40 text-purple-100'
                   : 'bg-gray-600/40 border-gray-500/30 text-gray-400'}`}
               title={ttsEnabled ? 'Mute voice responses' : 'Unmute voice responses'}
             >
@@ -842,7 +760,7 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
           {/* End Session */}
           {!sessionEnded && messages.length > 1 && (
             <button onClick={handleEndSession}
-              className="px-4 py-2 rounded-full bg-purple-600/30 border border-purple-500/30 text-purple-200 text-sm hover:bg-purple-600/50 transition-all">
+              className="px-4 py-2 rounded-full bg-purple-600/30 border border-purple-500/30 text-purple-100 text-sm hover:bg-purple-600/50 transition-all">
               End Session
             </button>
           )}
@@ -850,7 +768,7 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
 
         {/* Messages — purple scrollbar to match dark background */}
         <div
-          className="flex-1 overflow-y-auto p-8 space-y-3 relative z-10"
+          className="flex-1 overflow-y-auto p-8 space-y-3 relative z-10 scrollbar-thin scrollbar-thumb-purple-700/40 scrollbar-track-transparent"
           style={{
             scrollbarWidth: 'thin',
             scrollbarColor: 'rgba(109,40,217,0.4) transparent',
@@ -865,7 +783,7 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
                 className={`inline-block px-4 py-2 rounded-2xl backdrop-blur-md shadow-md break-words transition-transform duration-500 transform whitespace-pre-line
                   ${msg.isUser
                     ? 'bg-gradient-to-r from-purple-600 to-purple-500 text-white'
-                    : 'bg-[#1a1035]/60 border border-purple-500/20 text-purple-200 animate-slideUp'}`}
+                    : 'bg-[#231550]/75 border border-purple-500/20 text-purple-100 animate-slideUp'}`}
                 style={{ maxWidth: '70%' }}
               >
                 {msg.text}
@@ -900,7 +818,7 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
 
           {isAnalyzing && (
             <div className="flex justify-start">
-              <div className="inline-flex items-center px-4 py-2 rounded-2xl backdrop-blur-md shadow-md bg-[#1a1035]/60 border border-purple-500/20 animate-fadeIn" style={{ maxWidth: '40%' }}>
+              <div className="inline-flex items-center px-4 py-2 rounded-2xl backdrop-blur-md shadow-md bg-[#231550]/75 border border-purple-500/20 animate-fadeIn" style={{ maxWidth: '40%' }}>
                 <span className="text-purple-300 mr-2">Analyzing emotions</span>
                 <div className="flex items-center space-x-1">
                   <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce"></span>
@@ -913,7 +831,7 @@ const VoicePage = ({ onBack, onHomeClick, onMentalStateClick, onHistoryClick, on
 
           {isTyping && !isAnalyzing && (
             <div className="flex justify-start">
-              <div className="inline-flex items-center px-4 py-2 rounded-2xl backdrop-blur-md shadow-md bg-[#1a1035]/60 border border-purple-500/20 animate-fadeIn" style={{ maxWidth: '40%' }}>
+              <div className="inline-flex items-center px-4 py-2 rounded-2xl backdrop-blur-md shadow-md bg-[#231550]/75 border border-purple-500/20 animate-fadeIn" style={{ maxWidth: '40%' }}>
                 <span className="text-purple-300 mr-2">Bot is typing</span>
                 <div className="flex items-center space-x-1">
                   <span className="w-2 h-2 bg-purple-300 rounded-full animate-bounce"></span>
