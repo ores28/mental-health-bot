@@ -23,7 +23,7 @@ This repository has been restructured into a modular and reproducible layout.
 - scripts/: Local setup and run scripts
 
 ## Quick Start
-1. Inside backend/models/deection, add Goemotion-detection and Sentiment-analysis folders
+1. Inside backend/models/detection, add Goemotion-detection and Sentiment-analysis folders
 
 2. Copy .env.example to .env and set your values.
    You have to add/change the following - 
